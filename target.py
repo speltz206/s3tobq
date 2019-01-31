@@ -10,7 +10,7 @@ from luigi.contrib import bigquery, gcs
 import boto3
 import botocore
 from oauth2client.client import GoogleCredentials
-from xx_utils import check_partition_modified
+from rs_utils import check_partition_modified
 
 import logging
 logger = logging.getLogger("etl")
@@ -21,6 +21,11 @@ ch.setFormatter(formatter)
 logger.addHandler(ch)
 
 
+sp_bucket='snowplow-enrich-output'
+s3 = boto3.client('s3', 'us-west-2',
+						aws_access_key_id=os.environ.get('AWS_ACCESS'),
+						aws_secret_access_key=os.environ.get('AWS_SECRET')
+						)
 
 
 
@@ -29,96 +34,43 @@ class process_raw_snowplow_event_data(luigi.Task):
 	# force_run = luigi.BoolParameter()
 	_start = luigi.DateSecondParameter(default=datetime.utcnow())
 	file_root = luigi.Parameter()
-	sp_bucket='xxx'
-	s3 = boto3.client('s3', 'us-west-2',
-						aws_access_key_id=os.environ.get('AWS_ACCESS'),
-						aws_secret_access_key=os.environ.get('AWS_SECRET')
-						)
 
 
+	@staticmethod
 	def download_s3_file(self, s3_filename):
+		s3_file_full_path = re.compile(r"snowplow-enrich-output/enriched/archive/run=" + self.dataset_date.strftime("%Y-%m-%d") +r"-\d{2}-\d{2}-\d{2}/")
 
-		local_filename = "/etl/%s" % s3_filename
-	
-		s3_file_full_path = re.compile(r"xx/enriched/archive/run=" + self.dataset_date.strftime("%Y-%m-%d") +r"-\d{2}-\d{2}-\d{2}/")
-
+		local_filename = "/Users/samuel.peltz/etl/%s" % s3_filename
 		try:
-			s3.download_file(Bucket='xx', Key=s3_file_full_path, Filename=local_filename)
+			s3.download_file(Bucket=os.environ.get('SP_BUCKET'), Key=s3_filename, Filename=local_filename)
 		except Exception as e:
 			logger.error("%s - Could not retrieve %s because: %s" % ("download_s3_file()", s3_filename, e))
 			raise
 
-		return local_filename	
+		return local_filename
 
-	def output(self):
-		return luigi.LocalTarget("/etl/%s_%s.json.gz" % (self.file_root, self.dataset_date.strftime("%Y%m%d")))
-
-	def list_files(sp_bucket):
+	def list_files(self, sp_bucket):
 		files = []
-		response = s3.list_objects_v2(Bucket=sp_bucket)
+		response = s3.list_objects_v2(Bucket=os.environ.get('SP_BUCKET'))
 		while True:
 			files.extend([o['Key'] for o in response['Contents']])
 			if not response['IsTruncated']:
 				break
 		else:
-			response = s3.list_objects_v2(Bucket='sp_bucket',
+			response = s3.list_objects_v2(Bucket=os.environ.get('SP_BUCKET'),
 							 ContinuationToken=response['NextContinuationToken'])
 
-		pattern = re.compile(r"xx/enriched/archive/run=" + self.dataset_date.strftime("%Y-%m-%d") + r"-\d{2}-\d{2}-\d{2}/part-\d{5}\.*")		
+		pattern = re.compile(r"snowplow-enrich-output/enriched/archive/run=" + self.dataset_date.strftime("%Y-%m-%d") + r"-\d{2}-\d{2}-\d{2}/part-\d{5}\.*")		
 
 		for thisfile in files:
 			if re.match(pattern, thisfile):
-				s3.download_file(Bucket='xx', Key=thisfile)
+				s3.download_file(Bucket=os.environ.get('SP_BUCKET'), Key=thisfile)
 
 		return files
 
+	def output(self):
+		return luigi.LocalTarget("/Users/samuel.peltz/etl/%s_%s.json.gz" % (self.file_root, self.dataset_date.strftime("%Y%m%d")))
 
-	def run(self):
-		match_files = self.list_files('sp_bucket')
-		s3_filename = "part_%s.%s.json.gz" % (self.file_root, (self.dataset_date + timedelta(days=1)).strftime("%Y-%m-%d"))
-		infile_name = self.download_s3_file(s3_file_full_path)
-		with gzip.open(self.output().path, "wb") as outfile:
-			with gzip.open(infile_name, "rb") as infile:
-				for line in infile:
-					try:
-						indict = json.loads(line)
-					except Exception as e:
-						logger.warn("s -Could not parse line: %s =%s" % (self.__class__.__name__, e, line))
-						continue
-
-						outdict = indict
-						
-						try:
-							outdict['etl_tstamp'] = dateutil.parser.parse(indict['etl_tstamp']).strftime('%Y-%m-%d %H:%M:%S')
-						except KeyError:
-							pass
-						try:
-							outdict['collector_tstamp'] = dateutil.parser.parse(indict['collector_tstamp']).strftime('%Y-%m-%d %H:%M:%S')
-						except KeyError:
-							pass
-						try:
-							outdict['dvce_created_tstamp'] = dateutil.parser.parse(indict['dvce_created_tstamp']).strftime('%Y-%m-%d %H:%M:%S')
-						except KeyError:
-							pass
-						try:
-							outdict['dvce_sent_tstamp'] = dateutil.parser.parse(indict['dvce_sent_tstamp']).strftime('%Y-%m-%d %H:%M:%S')
-						except (KeyError, TypeError):
-							pass
-						try:
-							outdict['refr_dvce_tstamp'] = dateutil.parser.parse(indict['refr_dvce_tstamp']).strftime('%Y-%m-%d %H:%M:%S')
-						except (KeyError, TypeError):
-							pass
-						try:
-							outdict['derived_tstamp'] = dateutil.parser.parse(indict['derived_tstamp']).strftime('%Y-%m-%d %H:%M:%S')
-						except (KeyError, TypeError):
-							pass
-						try:
-							outdict['true_tstamp'] = dateutil.parser.parse(indict['true_tstamp']).strftime('%Y-%m-%d %H:%M:%S')
-						except (KeyError, TypeError):
-							pass
-						
-						json.dump(outdict, outfile)
-						outfile.write("\n")
 
 
 class snowplow_enriched_upload_data(luigi.Task):
@@ -156,7 +108,7 @@ class snowplow_enriched_insert_data(bigquery.BigqueryLoadTask):
 
 	def output(self):
 		return bigquery.BigqueryTarget(
-			"xx",
+			"realself-main",
 			"snowplow",
 			"Events"
 			)
@@ -166,6 +118,68 @@ class snowplow_enriched_insert_data(bigquery.BigqueryLoadTask):
 			table="%s.%s" % (self.output().table.dataset_id, self.file_root),
 			partition=self.dataset_date.strftime("%Y%m%d"), threshold=60, time_ref=self._start)
 
+class process_sp_data(process_raw_snowplow_event_data):
+	def run(self):
+		match_files = self.list_files(os.environ.get('SP_BUCKET'))
+		s3_filename = "part_%s.%s.json.gz" % (
+		self.file_root, (self.dataset_date + timedelta(days=1)).strftime("%Y-%m-%d"))
+		infile_name = self.download_s3_file('s3_filename')
+		with gzip.open(self.output().path, "wb") as outfile:
+			with gzip.open(infile_name, "rb") as infile:
+				for line in infile:
+					try:
+						indict = json.loads(line)
+					except Exception as e:
+						logger.warn("s -Could not parse line: %s =%s" % (self.__class__.__name__, e, line))
+						continue
+
+						outdict = indict
+
+						try:
+							outdict['etl_tstamp'] = dateutil.parser.parse(indict['etl_tstamp']).strftime(
+								'%Y-%m-%d %H:%M:%S')
+						except KeyError:
+							pass
+						try:
+							outdict['collector_tstamp'] = dateutil.parser.parse(indict['collector_tstamp']).strftime(
+								'%Y-%m-%d %H:%M:%S')
+						except KeyError:
+							pass
+						try:
+							outdict['dvce_created_tstamp'] = dateutil.parser.parse(
+								indict['dvce_created_tstamp']).strftime('%Y-%m-%d %H:%M:%S')
+						except KeyError:
+							pass
+						try:
+							outdict['dvce_sent_tstamp'] = dateutil.parser.parse(indict['dvce_sent_tstamp']).strftime(
+								'%Y-%m-%d %H:%M:%S')
+						except (KeyError, TypeError):
+							pass
+						try:
+							outdict['refr_dvce_tstamp'] = dateutil.parser.parse(indict['refr_dvce_tstamp']).strftime(
+								'%Y-%m-%d %H:%M:%S')
+						except (KeyError, TypeError):
+							pass
+						try:
+							outdict['derived_tstamp'] = dateutil.parser.parse(indict['derived_tstamp']).strftime(
+								'%Y-%m-%d %H:%M:%S')
+						except (KeyError, TypeError):
+							pass
+						try:
+							outdict['true_tstamp'] = dateutil.parser.parse(indict['true_tstamp']).strftime(
+								'%Y-%m-%d %H:%M:%S')
+						except (KeyError, TypeError):
+							pass
+
+						json.dump(outdict, outfile)
+						outfile.write("\n")
+
+
+class upload_to_bq(snowplow_enriched_upload_data):
+		def requires(self):
+				return process_sp_data(**self.param_kwargs)
+
+class insert_data(snowplow_enriched_insert_data):
 
 	schema = [
 		{
@@ -869,7 +883,7 @@ class snowplow_enriched_insert_data(bigquery.BigqueryLoadTask):
 	]
 
 	def requires(self):
-		return snowplow_enriched_upload_data(**self.param_kwargs)	
+		return upload_to_bq(**self.param_kwargs)
 
 
 	
