@@ -5,7 +5,7 @@ import json
 import gzip
 import luigi
 import pdb
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from luigi.contrib import bigquery, gcs
 import boto3
 import botocore
@@ -36,15 +36,17 @@ class process_raw_snowplow_event_data(luigi.Task):
 	file_root = luigi.Parameter()
 
 
-	@staticmethod
 	def download_s3_file(self, s3_filename):
-		s3_file_full_path = re.compile(r"snowplow-enrich-output/enriched/archive/run=" + self.dataset_date.strftime("%Y-%m-%d") +r"-\d{2}-\d{2}-\d{2}/")
 
 		local_filename = "/Users/samuel.peltz/etl/%s" % s3_filename
+
+		s3_file_full_path =re.compile("snowplow-enrich-output/enriched/archive/run=" + self.dataset_date.strftime("%Y-%m-%d") +r"-\d{2}-\d{2}-\d{2}/*.")
+
+
 		try:
-			s3.download_file(Bucket=os.environ.get('SP_BUCKET'), Key=s3_filename, Filename=local_filename)
+			s3.download_file(Bucket=os.environ.get('SP_BUCKET'), Key=s3_file_full_path, Filename=local_filename)
 		except Exception as e:
-			logger.error("%s - Could not retrieve %s because: %s" % ("download_s3_file()", s3_filename, e))
+			logger.error("%s - Could not retrieve %s because: %s" % ("download_s3_file()", s3_file_full_path, e))
 			raise
 
 		return local_filename
@@ -88,9 +90,6 @@ class snowplow_enriched_upload_data(luigi.Task):
 	def output(self):
 		return gcs.GCSTarget("gs://snowplow_tracker/%s_%s.json.gz" % (self.file_root, self.dataset_date.strftime("%Y$m%d")))
 
-	def requires(self):
-		return process_raw_snowplow_event_data(**self.param_kwargs)
-
 
 
 class snowplow_enriched_insert_data(bigquery.BigqueryLoadTask):
@@ -119,11 +118,13 @@ class snowplow_enriched_insert_data(bigquery.BigqueryLoadTask):
 			partition=self.dataset_date.strftime("%Y%m%d"), threshold=60, time_ref=self._start)
 
 class process_sp_data(process_raw_snowplow_event_data):
+	s3_file_full_path =re.compile("snowplow-enrich-output/enriched/archive/run=" + self.dataset_date.strftime("%Y-%m-%d") +r"    -\d{2}-\d{2}-\d{2}/*.")
+
 	def run(self):
+
+		infile_name = self.download_s3_file(s3_file_full_path)
 		match_files = self.list_files(os.environ.get('SP_BUCKET'))
-		s3_filename = "part_%s.%s.json.gz" % (
-		self.file_root, (self.dataset_date + timedelta(days=1)).strftime("%Y-%m-%d"))
-		infile_name = self.download_s3_file('s3_filename')
+
 		with gzip.open(self.output().path, "wb") as outfile:
 			with gzip.open(infile_name, "rb") as infile:
 				for line in infile:
